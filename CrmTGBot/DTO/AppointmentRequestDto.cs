@@ -1,11 +1,12 @@
 ﻿namespace CrmTGBot.DTO
 {
-    public class AppointmentRequestDto
+    public record AppointmentRequestDto
     {
-        public string FullName { get; set; } = string.Empty;
-        public string PhoneNumber { get; set; } = string.Empty;
-        public string Service { get; set; } = string.Empty;
-        public DateTime Time { get; set; }
-        public long TelegramChatId { get; set; }
+        public string FullName { get; init; } = string.Empty;
+        public string PhoneNumber { get; init; } = string.Empty;
+        public int ServiceItemId { get; init; }
+        public int MasterId { get; init; }
+        public DateTime Time { get; init; }
+        public long TelegramChatId { get; init; }
     }
 }

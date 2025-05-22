@@ -2,10 +2,19 @@
 {
     public class AppointmentConversation
     {
-        public string? FullName { get; set; }
-        public string? PhoneNumber { get; set; }
-        public string? Service { get; set; }
+        public int Step { get; set; } = 0;
+
+        public string FullName { get; set; } = string.Empty;
+        public string PhoneNumber { get; set; } = string.Empty;
+
+        // списки «на время диалога»
+        public List<ServiceItemDto> Services { get; set; } = new();
+        public int? ServiceItemId { get; set; }
+
+        public List<MasterDto> Masters { get; set; } = new();
+        public int? MasterId { get; set; }
+
         public DateTime? Time { get; set; }
-        public int Step { get; set; } = 0; // 0 - имя, 1 - телефон, 2 - услуга, 3 - дата/время
     }
+
 }

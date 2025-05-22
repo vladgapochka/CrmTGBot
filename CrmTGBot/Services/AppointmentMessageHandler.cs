@@ -8,112 +8,136 @@ namespace CrmTGBot.Services
 {
     public class AppointmentMessageHandler : IMessageHandler
     {
-        private readonly HttpClient _httpClient;
-        private readonly string _serviceApi;
-        private static readonly Dictionary<long, AppointmentConversation> _conversations = new();
+        private readonly HttpClient _http;
+        private readonly string _api;
+        private static readonly Dictionary<long, AppointmentConversation> _conv = new();
 
-        public AppointmentMessageHandler(HttpClient httpClient)
+        public AppointmentMessageHandler(HttpClient http)
         {
-            _httpClient = httpClient;
-            _serviceApi = Environment.GetEnvironmentVariable("CrmService_api");
+            _http = http;
+            _api = Environment.GetEnvironmentVariable("CrmService_api")!;
         }
 
         [Obsolete]
-        public async Task<bool> HandleAsync(ITelegramBotClient client, Update update, CancellationToken ct)
+        public async Task<bool> HandleAsync(ITelegramBotClient bot, Update upd, CancellationToken ct)
         {
-            if (update.Type != UpdateType.Message || update.Message?.Text is null)
+            if (upd.Type != UpdateType.Message || upd.Message?.Text is null)
                 return false;
 
-            var chatId = update.Message.Chat.Id;
-            var text = update.Message.Text.Trim();
-            if (!_conversations.ContainsKey(chatId))
-            {
-                if (text != "📅 Записаться")
-                    return false;
+            var chat = upd.Message.Chat.Id;
+            var msg = upd.Message.Text.Trim();
 
-                _conversations[chatId] = new AppointmentConversation();
-                await client.SendTextMessageAsync(chatId, "Как вас зовут?", cancellationToken: ct);
+            // ---------- старт диалога ----------
+            if (!_conv.ContainsKey(chat))
+            {
+                if (msg != "📅 Записаться") return false;
+
+                _conv[chat] = new();
+                await bot.SendTextMessageAsync(chat, "Как вас зовут?", cancellationToken: ct);
                 return true;
             }
 
-            if (!_conversations.TryGetValue(chatId, out var convo))
+            var c = _conv[chat];
+
+            // ---------- шаги диалога ----------
+            switch (c.Step)
             {
-                convo = new AppointmentConversation();
-                _conversations[chatId] = convo;
-                await client.SendTextMessageAsync(chatId, "Как вас зовут?", cancellationToken: ct);
-                return true;
-            }
-
-            switch (convo.Step)
-            {
-                case 0:
-                    convo.FullName = text;
-                    convo.Step++;
-                    await client.SendTextMessageAsync(chatId, "Ваш номер телефона? (в формате +79991234567)", cancellationToken: ct);
+                case 0:                                             // ФИО
+                    c.FullName = msg;
+                    c.Step = 1;
+                    await bot.SendTextMessageAsync(chat, "Ваш номер телефона? (формат +79991234567)", cancellationToken: ct);
                     return true;
 
-                case 1:
-                    convo.PhoneNumber = text;
-                    convo.Step++;
-                    await client.SendTextMessageAsync(chatId, "Какую услугу вы хотите? (например: маникюр)", cancellationToken: ct);
+                case 1:                                             // телефон
+                    c.PhoneNumber = msg;
+                    c.Step = 2;
+
+                    // получаем услуги
+                    c.Services = await _http.GetFromJsonAsync<List<ServiceItemDto>>($"{_api}/serviceitems", ct);
+                    var list = string.Join('\n', c.Services.Select((s, i) => $"{i + 1}. {s.Name}"));
+                    await bot.SendTextMessageAsync(chat, $"Выберите услугу, ответив её номером:\n{list}", cancellationToken: ct);
                     return true;
 
-                case 2:
-                    convo.Service = text;
-                    convo.Step++;
-                    await client.SendTextMessageAsync(chatId, "Введите дату и время в формате `ДД.ММ.ГГГГ ЧЧ:ММ`", parseMode: ParseMode.Markdown, cancellationToken: ct);
-                    return true;
-
-                case 3:
-                    if (!DateTime.TryParse(text, out var dt))
+                case 2:                                             // выбор услуги
+                    if (!int.TryParse(msg, out var sNum) || sNum < 1 || sNum > c.Services.Count)
                     {
-                        await client.SendTextMessageAsync(chatId, "Неверный формат даты. Повторите:", cancellationToken: ct);
+                        await bot.SendTextMessageAsync(chat, "Номер услуги не распознан, попробуйте ещё раз:", cancellationToken: ct);
                         return true;
                     }
+                    c.ServiceItemId = c.Services[sNum - 1].Id;
+                    c.Step = 3;
 
-                    convo.Time = DateTime.SpecifyKind(dt, DateTimeKind.Utc); // безопасно для PostgreSQL
+                    // получаем мастеров
+                    c.Masters = await _http.GetFromJsonAsync<List<MasterDto>>($"{_api}/masters", ct) ?? [];
+                    var mList = string.Join('\n', c.Masters.Select((m, i) => $"{i + 1}. {m.FullName}"));
+                    await bot.SendTextMessageAsync(chat, $"К какому мастеру? Ответьте номером:\n{mList}", cancellationToken: ct);
+                    return true;
 
-                    // Отправка в API
-                    var request = new AppointmentRequestDto
+                case 3:                                             // выбор мастера
+                    if (!int.TryParse(msg, out var mNum) || mNum < 1 || mNum > c.Masters.Count)
                     {
-                        FullName = convo.FullName!,
-                        PhoneNumber = convo.PhoneNumber!,
-                        Service = convo.Service!,
-                        Time = convo.Time.Value,
-                        TelegramChatId = chatId
+                        await bot.SendTextMessageAsync(chat, "Номер мастера не распознан, попробуйте ещё раз:", cancellationToken: ct);
+                        return true;
+                    }
+                    c.MasterId = c.Masters[mNum - 1].Id;
+                    c.Step = 4;
+
+                    await bot.SendTextMessageAsync(chat,
+                        "Дата и время в формате `ДД.ММ.ГГГГ ЧЧ:ММ`",
+                        parseMode: ParseMode.Markdown, cancellationToken: ct);
+                    return true;
+
+                case 4:                                             // дата/время
+                    if (!DateTime.TryParse(msg, out var dt))
+                    {
+                        await bot.SendTextMessageAsync(chat, "Неверный формат даты, попробуйте ещё раз:", cancellationToken: ct);
+                        return true;
+                    }
+                    c.Time = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+
+                    // ---------- отправляем в CRM ----------
+                    var req = new AppointmentRequestDto
+                    {
+                        FullName = c.FullName,
+                        PhoneNumber = c.PhoneNumber,
+                        ServiceItemId = c.ServiceItemId!.Value,
+                        MasterId = c.MasterId!.Value,
+                        Time = c.Time.Value,
+                        TelegramChatId = chat
                     };
 
                     try
                     {
-                        var response = await _httpClient.PostAsJsonAsync(_serviceApi, request, ct);
-
-                        if (!response.IsSuccessStatusCode)
+                        var resp = await _http.PostAsJsonAsync($"{_api}/appointments", req, ct);
+                        if (!resp.IsSuccessStatusCode)
                         {
-                            await client.SendTextMessageAsync(chatId, "Ошибка при создании заявки.", cancellationToken: ct);
+                            await bot.SendTextMessageAsync(chat, "🚫 Ошибка при создании заявки.", cancellationToken: ct);
                             return true;
                         }
 
-                        var result = await response.Content.ReadFromJsonAsync<AppointmentResponseDto>(cancellationToken: ct);
-                        await client.SendTextMessageAsync(chatId,
+                        await bot.SendTextMessageAsync(chat,
                             $"✅ Заявка создана!\n\n" +
-                            $"👤 {result.ClientName}\n" +
-                            $"📞 {request.PhoneNumber}\n" +
-                            $"💅 {result.Service}\n" +
-                            $"📅 {result.Time:G}\n" +
+                            $"👤 {req.FullName}\n" +
+                            $"📞 {req.PhoneNumber}\n" +
+                            $"💅 {c.Services.First(s => s.Id == req.ServiceItemId).Name}\n" +
+                            $"🧑‍🔧 {c.Masters.First(m => m.Id == req.MasterId).FullName}\n" +
+                            $"📅 {req.Time:dd.MM.yyyy HH:mm}\n" +
                             $"Статус: На подтверждении",
-                            parseMode: ParseMode.Markdown, cancellationToken: ct);
+                            cancellationToken: ct);
+
                     }
                     catch (Exception ex)
                     {
-                        await client.SendTextMessageAsync(chatId, $"Ошибка: {ex.Message}", cancellationToken: ct);
+                        await bot.SendTextMessageAsync(chat, $"Ошибка: {ex.Message}", cancellationToken: ct);
                     }
 
-                    _conversations.Remove(chatId); // очистить состояние
+                    _conv.Remove(chat);          // конец диалога
                     return true;
             }
 
             return false;
         }
     }
+
 }
 
